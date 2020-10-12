@@ -98,11 +98,12 @@ class IForestModel (
     // append a score column
     val scoreDataset = dataset.withColumn($(anomalyScoreCol), scoreUDF(col($(featuresCol))))
 
-    if (threshold < 0) {
-      logger.info("threshold is not set, calculating the anomaly threshold according to param contamination..")
-      threshold = scoreDataset.stat.approxQuantile($(anomalyScoreCol),
-        Array(1 - $(contamination)), $(approxQuantileRelativeError))(0)
-    }
+    threshold = 0.5
+//    if (threshold < 0) {
+//      logger.info("threshold is not set, calculating the anomaly threshold according to param contamination..")
+//      threshold = scoreDataset.stat.approxQuantile($(anomalyScoreCol),
+//        Array(1 - $(contamination)), $(approxQuantileRelativeError))(0)
+//    }
 
     // set anomaly instance label 1
     val predictUDF = udf { (anomalyScore: Double) =>
@@ -136,10 +137,18 @@ class IForestModel (
     case leafNode: IFLeafNode => currentPathLength + avgLength(leafNode.numInstance)
     case internalNode: IFInternalNode =>
       val attrIndex = internalNode.featureIndex
-      if (features(attrIndex) < internalNode.featureValue) {
-        calPathLength(features, internalNode.leftChild, currentPathLength + 1)
+      if (attrIndex >= features.size - $(numCategoricalFeatures)){
+        if (features(attrIndex) == internalNode.featureValue) {
+          calPathLength(features, internalNode.leftChild, currentPathLength + 1)
+        } else {
+          calPathLength(features, internalNode.rightChild, currentPathLength + 1)
+        }
       } else {
-        calPathLength(features, internalNode.rightChild, currentPathLength + 1)
+        if (features(attrIndex) < internalNode.featureValue) {
+          calPathLength(features, internalNode.leftChild, currentPathLength + 1)
+        } else {
+          calPathLength(features, internalNode.rightChild, currentPathLength + 1)
+        }
       }
   }
 
@@ -387,6 +396,9 @@ class IForest (
   /** @group setParam */
   def setApproxQuantileRelativeError(value: Double): this.type = set(approxQuantileRelativeError, value)
 
+  /** @group setParam */
+  def setNumCategoricalFeatures(value: Int): this.type = set(numCategoricalFeatures, value)
+
   override def copy(extra: ParamMap): IForest = defaultCopy(extra)
 
   lazy val rng = new Random($(seed))
@@ -500,7 +512,7 @@ class IForest (
     instr.logPipelineStage(this)
     instr.logDataset(dataset)
     instr.logParams(this, numTrees, maxSamples, maxFeatures, maxDepth, contamination,
-      approxQuantileRelativeError, bootstrap, seed, featuresCol, predictionCol, labelCol)
+      approxQuantileRelativeError, bootstrap, seed, featuresCol, predictionCol, labelCol, numCategoricalFeatures)
 
     // Each iTree of the iForest will be built on parallel and collected in the driver.
     // Approximate memory usage for iForest model is calculated, a warning will be raised if iForest is too large.
@@ -534,7 +546,8 @@ class IForest (
         // last position's value indicates constant feature offset index
         constantFeatures(numFeatures) = 0
         // build a tree
-        iTree(trainData, 0, possibleMaxDepth, constantFeatures, featureIdxArr, random)
+        iTree(trainData, 0, possibleMaxDepth, constantFeatures, featureIdxArr, random,
+          $(numCategoricalFeatures))
 
     }.collect()
 
@@ -597,7 +610,8 @@ class IForest (
     * @param constantFeatures an array stores constant features indices, constant features
     *                         will not be drawn
     * @param featureIdxArr an array stores the mapping from the sampled feature idx to the origin feature idx
-    * @param randomSeed random for generating iTree
+    * @param random random for generating iTree
+    * @param numCategoricalFeatures the number of categorical features at the end of the features array
     * @return tree's root node
     */
   private[iforest] def iTree(data: Array[Array[Double]],
@@ -605,7 +619,7 @@ class IForest (
       maxDepth: Int,
       constantFeatures: Array[Int],
       featureIdxArr: Array[Int],
-      random: Random): IFNode = {
+      random: Random, numCategoricalFeatures: Int): IFNode = {
 
     var constantFeatureIndex = constantFeatures.last
     // the condition of leaf node
@@ -644,13 +658,28 @@ class IForest (
         // select randomly a feature value between (attrMin, attrMax)
         val attrValue = random.nextDouble() * (attrMax - attrMin) + attrMin
         // split data according to the attrValue
-        val leftData = data.filter(point => point(attrIndex) < attrValue)
-        val rightData = data.filter(point => point(attrIndex) >= attrValue)
-        // recursively build a tree
-        new IFInternalNode(
-          iTree(leftData, currentPathLength + 1, maxDepth, constantFeatures.clone(), featureIdxArr, random),
-          iTree(rightData, currentPathLength + 1, maxDepth, constantFeatures.clone(), featureIdxArr, random),
-          featureIdxArr(attrIndex), attrValue)
+
+        if(attrIndex >= numFeatures - numCategoricalFeatures) {
+          val leftData = data.filter(point => point(attrIndex) == attrValue)
+          val rightData = data.filter(point => point(attrIndex) != attrValue)
+          // recursively build a tree
+          new IFInternalNode(
+            iTree(leftData, currentPathLength + 1, maxDepth, constantFeatures.clone(), featureIdxArr, random,
+              numCategoricalFeatures),
+            iTree(rightData, currentPathLength + 1, maxDepth, constantFeatures.clone(), featureIdxArr, random,
+              numCategoricalFeatures),
+            featureIdxArr(attrIndex), attrValue)
+        } else {
+          val leftData = data.filter(point => point(attrIndex) < attrValue)
+          val rightData = data.filter(point => point(attrIndex) >= attrValue)
+          // recursively build a tree
+          new IFInternalNode(
+            iTree(leftData, currentPathLength + 1, maxDepth, constantFeatures.clone(), featureIdxArr, random,
+              numCategoricalFeatures),
+            iTree(rightData, currentPathLength + 1, maxDepth, constantFeatures.clone(), featureIdxArr, random,
+              numCategoricalFeatures),
+            featureIdxArr(attrIndex), attrValue)
+        }
       }
     }
   }
@@ -731,6 +760,22 @@ trait IForestParams extends Params {
 
   /** @group getParam */
   def getMaxDepth: Int = $(maxDepth)
+
+  /**
+   * The number of the categorical features. Categorical features must be at the end of the features array.
+   *
+   * The default value is 0.
+   * @group param
+   */
+  final val numCategoricalFeatures: IntParam =
+    new IntParam(this, "numCategoricalFeatures", "The number of categorical features " +
+      "at the end of features array", ParamValidators.gtEq(0))
+
+  /** @group setParam */
+  setDefault(numCategoricalFeatures, value = 0)
+
+  /** @group getParam */
+  final def getNumCategoricalFeatures: Int = $(numCategoricalFeatures)
 
   /**
     * The proportion of outliers in the data set (0< contamination < 1).
