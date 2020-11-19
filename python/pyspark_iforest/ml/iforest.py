@@ -236,7 +236,7 @@ class IForest(JavaEstimator, HasFeaturesCol, HasPredictionCol, HasSeed, JavaMLWr
                                         "Relative Error for anomaly score approximate quantile calculaion (0 <= e <= 1)",
                                         typeConverter=TypeConverters.toFloat)
 
-     numCategoricalFeatures = Param(Params._dummy(), "numCategoricalFeatures",
+    numCategoricalFeatures = Param(Params._dummy(), "numCategoricalFeatures",
                                     "The number of categorical features at the end of features array",
                                     typeConverter=TypeConverters.toInt)
 
